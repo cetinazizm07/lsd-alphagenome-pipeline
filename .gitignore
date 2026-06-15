@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+
+# API keys — never commit
+.env
+*.env
+
+# Pipeline outputs & checkpoints
+output/
+checkpoints/
+demo/output/
+demo/reference/
+*.csv
+*.json
+*.fa
+*.fasta
+*.bam
+*.bai
+
+# Large data files
+*.mtx
+*.mtx.gz
+*.h5
+*.h5ad
+*.bed.gz
+
+# macOS
+.DS_Store
