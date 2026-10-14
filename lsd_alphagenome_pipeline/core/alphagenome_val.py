@@ -97,11 +97,19 @@ class AlphaGenomeValidator:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
-        self._client = AlphaGenomeClient(
-            api_key=config.alphagenome_api_key,
-            max_retries=config.alphagenome_max_retries,
-            backoff_base=config.alphagenome_backoff_base,
-        )
+        if config.alphagenome_api_key == "mock":
+            from lsd_alphagenome_pipeline.utils.mock_client import MockAlphaGenomeClient
+            self._client = MockAlphaGenomeClient(
+                locked_positions=frozenset(),
+                cre_start=0,
+                seed=config.random_seed,
+            )
+        else:
+            self._client = AlphaGenomeClient(
+                api_key=config.alphagenome_api_key,
+                max_retries=config.alphagenome_max_retries,
+                backoff_base=config.alphagenome_backoff_base,
+            )
         self._ontology = [config.cell_ontology_id()]
 
     # ------------------------------------------------------------------
@@ -120,6 +128,15 @@ class AlphaGenomeValidator:
         position — this gives a consistent baseline using the same
         AlphaGenome window as the mutants.
         """
+        if self.config.alphagenome_api_key == "mock":
+            from lsd_alphagenome_pipeline.core.mutagenesis import MutagenesisEngine
+            from lsd_alphagenome_pipeline.utils.mock_client import MockAlphaGenomeClient
+            locked = MutagenesisEngine._locked_positions(wt_cre.motif_hits, len(wt_cre.sequence))
+            self._client = MockAlphaGenomeClient(
+                locked_positions=locked,
+                cre_start=wt_cre.interval.start,
+                seed=self.config.random_seed,
+            )
         interval_start, interval_end = self._build_context_interval(wt_cre)
         log.info(
             "AlphaGenome context window: %s:%d-%d (%d bp)",
@@ -194,6 +211,7 @@ class AlphaGenomeValidator:
         ref_base = seq[cre_mid_offset]
         abs_pos_1based = wt_cre.interval.start + cre_mid_offset + 1
 
+        organism = "mouse" if self.config.assembly in ("mm10", "mm39") else "human"
         raw = self._client.predict_variant_raw(
             chrom=wt_cre.interval.chrom,
             interval_start=interval_start,
@@ -202,6 +220,7 @@ class AlphaGenomeValidator:
             ref=ref_base,
             alt=ref_base,   # ref == alt → no actual mutation, returns WT track
             ontology_terms=self._ontology,
+            organism=organism,
         )
         return self._aggregate(raw, wt_cre, interval_start)
 
@@ -215,6 +234,7 @@ class AlphaGenomeValidator:
         wt_rna: float,
     ) -> list[ScoredVariant]:
         scored: list[ScoredVariant] = []
+        organism = "mouse" if self.config.assembly in ("mm10", "mm39") else "human"
         for variant in batch:
             try:
                 raw = self._client.predict_variant_raw(
@@ -225,6 +245,7 @@ class AlphaGenomeValidator:
                     ref=variant.ref,
                     alt=variant.alt,
                     ontology_terms=self._ontology,
+                    organism=organism,
                 )
                 atac, rna = self._aggregate(raw, wt_cre, interval_start)
             except Exception as exc:
@@ -260,13 +281,17 @@ class AlphaGenomeValidator:
 
         Aggregation region is determined by config.track_agg_region:
           "cre"        — mean over the exact CRE genomic span
-          "tss_window" — mean over ±tss_window_bp from the CRE midpoint
+          "tss_window" — mean over ±tss_window_bp from the gene TSS (or CRE midpoint fallback)
         """
         if self.config.track_agg_region == "cre":
             region_start = wt_cre.interval.start
             region_end = wt_cre.interval.end
         else:
-            mid = wt_cre.interval.midpoint
+            if hasattr(wt_cre, "locus") and wt_cre.locus and hasattr(wt_cre.locus, "gene") and wt_cre.locus.gene:
+                g = wt_cre.locus.gene
+                mid = g.end if g.strand == "-" else g.start
+            else:
+                mid = wt_cre.interval.midpoint
             hw = self.config.tss_window_bp
             region_start = max(0, mid - hw)
             region_end = mid + hw

@@ -18,6 +18,7 @@ output/
 checkpoints/
 demo/output/
 demo/reference/
+examples/workspace/
 *.csv
 *.json
 *.fa

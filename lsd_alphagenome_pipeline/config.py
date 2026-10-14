@@ -144,16 +144,32 @@ class PipelineConfig:
         """Resolve cell_type string → ontology CURIE."""
         return resolve_cell_ontology(self.cell_type)
 
+    def fingerprint(self) -> str:
+        """Return a deterministic string representation of parameters affecting computation."""
+        keys = [
+            "genes_bed", "tf_motifs", "assembly", "fasta", "ctcf_bed",
+            "locus_flank_bp", "strategy", "max_variants", "strategy_window",
+            "spacer_max_delta_bp", "random_seed", "cell_type",
+            "motif_pvalue_threshold", "motif_bg_order", "track_agg_region"
+        ]
+        items = []
+        for k in keys:
+            v = getattr(self, k, None)
+            items.append(f"{k}={str(v)}")
+        return ";".join(items)
+
     # ------------------------------------------------------------------
     # Serialisation helpers
     # ------------------------------------------------------------------
 
-    def to_yaml(self, path: Path) -> None:
-        """Persist config to YAML for run reproducibility."""
-        data = {
-            k: (str(v) if isinstance(v, Path) else v)
-            for k, v in self.__dict__.items()
-        }
+    def to_yaml(self, path: Path, mask_key: bool = True) -> None:
+        """Persist config to YAML for run reproducibility (masks API key by default)."""
+        data = {}
+        for k, v in self.__dict__.items():
+            if k == "alphagenome_api_key" and mask_key and v:
+                data[k] = "***MASKED***"
+            else:
+                data[k] = str(v) if isinstance(v, Path) else v
         path.write_text(yaml.dump(data, sort_keys=True), encoding="utf-8")
         log.info("Config written to %s", path)
 

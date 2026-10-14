@@ -111,6 +111,7 @@ class AlphaGenomeClient:
         ref: str,
         alt: str,
         ontology_terms: list[str],
+        organism: str = "human",
     ) -> Any:
         """
         Call AlphaGenome predict_variant with retry.
@@ -118,12 +119,9 @@ class AlphaGenomeClient:
         *interval_start* / *interval_end* define the ~1 Mbp context window
         (0-based, half-open).  *variant_pos* is 1-based (VCF convention) as
         required by genome.Variant.
-
-        The tenacity decorator retries on any exception with exponential
-        back-off — this handles HTTP 429 (rate limit) and transient failures.
-        Max back-off is 60 s; after 5 attempts the exception propagates.
         """
         from alphagenome.data import genome  # type: ignore[import]
+        from alphagenome.models import dna_client  # type: ignore[import]
 
         model = self._get_model()
         interval = genome.Interval(
@@ -137,12 +135,19 @@ class AlphaGenomeClient:
             reference_bases=ref,
             alternate_bases=alt,
         )
-        return model.predict_variant(
-            interval=interval,
-            variant=variant,
-            ontology_terms=ontology_terms,
-            requested_outputs=self._output_types(),
-        )
+        kwargs: dict[str, Any] = {
+            "interval": interval,
+            "variant": variant,
+            "ontology_terms": ontology_terms,
+            "requested_outputs": self._output_types(),
+        }
+        if hasattr(dna_client, "Organism"):
+            kwargs["organism"] = (
+                dna_client.Organism.MUS_MUSCULUS
+                if organism == "mouse"
+                else dna_client.Organism.HOMO_SAPIENS
+            )
+        return model.predict_variant(**kwargs)
 
     def extract_track_region(
         self,
@@ -154,10 +159,8 @@ class AlphaGenomeClient:
         """
         Aggregate the per-base track over [region_start, region_end).
 
-        AlphaGenome returns tracks as numpy arrays aligned to the interval.
-        Offset = region_start - interval_start gives the slice index.
-
-        Returns (mean_atac, mean_rna) over the specified region.
+        Handles 1D (W,), 2D (T, W), and 2D (W, T) layouts robustly,
+        ignoring NaNs.
         """
         offset = region_start - interval_start
         length = region_end - region_start
@@ -167,19 +170,23 @@ class AlphaGenomeClient:
                 f"interval starting at {interval_start}"
             )
 
-        # AlphaGenome output attribute access:
-        # outputs.atac_seq  — shape (T, W) where T=tracks, W=window_bp
-        # outputs.rna_seq   — shape (T, W)
-        # We take mean over the CRE slice along W, then mean over T (tracks).
-        atac_track: np.ndarray = np.array(raw_outputs.atac_seq)
-        rna_track: np.ndarray = np.array(raw_outputs.rna_seq)
+        def _slice_mean(arr: np.ndarray) -> float:
+            if arr.ndim == 1:
+                sub = arr[offset: offset + length]
+            elif arr.ndim == 2:
+                # If rows correspond to window (W > T)
+                if arr.shape[0] >= length and arr.shape[0] > arr.shape[1]:
+                    sub = arr[offset: offset + length, :]
+                else:
+                    sub = arr[:, offset: offset + length]
+            else:
+                sub = arr
+            val = float(np.nanmean(sub))
+            return 0.0 if np.isnan(val) else val
 
-        # Handle both (W,) and (T, W) shapes
-        if atac_track.ndim == 1:
-            atac_score = float(np.mean(atac_track[offset:offset + length]))
-            rna_score = float(np.mean(rna_track[offset:offset + length]))
-        else:
-            atac_score = float(np.mean(atac_track[:, offset:offset + length]))
-            rna_score = float(np.mean(rna_track[:, offset:offset + length]))
+        atac_arr: np.ndarray = np.asarray(raw_outputs.atac_seq)
+        rna_arr: np.ndarray = np.asarray(raw_outputs.rna_seq)
 
+        atac_score = _slice_mean(atac_arr)
+        rna_score = _slice_mean(rna_arr)
         return atac_score, rna_score

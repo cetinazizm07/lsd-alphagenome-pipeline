@@ -38,6 +38,7 @@ Reproducibility notes
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -265,10 +266,20 @@ class LSDEngine:
             # Slide window across locus
             for win_start in range(0, locus.length - self.WINDOW_BP + 1, self.STEP_BP):
                 win_end = win_start + self.WINDOW_BP
-                window_hits = [
-                    h for h in locus_hits
-                    if win_start <= h.pos < win_end
-                ]
+                window_hits: list[MotifHit] = []
+                for h in locus_hits:
+                    # Require that motif starts within the window
+                    if win_start <= h.pos < win_end:
+                        window_hits.append(
+                            MotifHit(
+                                tf_name=h.tf_name,
+                                pos=h.pos - win_start,  # Normalize to 0-based CRE window offset
+                                strand=h.strand,
+                                score=h.score,
+                                pvalue=h.pvalue,
+                                width=h.width,
+                            )
+                        )
                 if not window_hits:
                     continue
 
@@ -286,19 +297,26 @@ class LSDEngine:
     @staticmethod
     def _enrichment_score(hits: list[MotifHit], window_bp: int) -> float:
         """
-        Composite enrichment score for a candidate window.
+        Combinatorial enrichment score for a candidate window W.
 
-        S(W) = Σ_tf [ I(tf ∈ W) × hits_per_tf / window_bp ]
-
-        Each TF contributes its normalised hit density.  Using density rather
-        than raw count penalises windows dominated by a single repetitive TF.
-
-        Ref: LSD paper §Methods "CRE selection" — enrichment matrix rows
-        correspond to TFs, columns to windows; the column with max row-sum wins.
+        Ref: LSD paper (Gargiulo et al. 2024) & GitLab sLCR_functions.py (fimo2tab):
+        Each TF contributes the significance of its best hit (-log10(p-value)).
+        The total score scales with both TF diversity (distinct TFs) and motif quality,
+        normalized by the window size.
         """
-        from collections import Counter
-        counts: Counter[str] = Counter(h.tf_name for h in hits)
-        return sum(c / window_bp for c in counts.values())
+        from collections import defaultdict
+        best_pval_per_tf: dict[str, float] = defaultdict(lambda: 1.0)
+        for h in hits:
+            best_pval_per_tf[h.tf_name] = min(best_pval_per_tf[h.tf_name], h.pvalue)
+
+        # Sum of -log10(p) across distinct TFs (with numerical guard p >= 1e-12)
+        score_sum = sum(
+            -math.log10(max(p, 1e-12))
+            for p in best_pval_per_tf.values()
+        )
+        num_distinct_tfs = len(best_pval_per_tf)
+        # Reward windows containing multiple distinct TFs from the signature network
+        return float((score_sum * math.sqrt(num_distinct_tfs)) / window_bp)
 
     # ------------------------------------------------------------------
     # Internal helpers

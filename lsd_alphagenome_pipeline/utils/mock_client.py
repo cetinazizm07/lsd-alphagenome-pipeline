@@ -68,6 +68,8 @@ class MockAlphaGenomeClient:
         ref: str,
         alt: str,
         ontology_terms: list[str],
+        organism: str = "human",
+        **kwargs: Any,
     ) -> Any:
         """
         Return synthetic tracks for a single variant.

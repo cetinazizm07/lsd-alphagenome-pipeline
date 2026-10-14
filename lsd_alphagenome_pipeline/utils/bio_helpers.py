@@ -15,6 +15,7 @@ References
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -67,12 +68,14 @@ class MotifHit:
 
     *pos* is 0-based offset from the start of the scanned sequence.
     *strand* is '+' or '-'.
+    *width* is the motif length in base pairs.
     """
     tf_name: str
     pos: int        # 0-based, relative to scanned sequence
     strand: str
     score: float
     pvalue: float
+    width: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +189,8 @@ def scan_motifs(
     # Background nucleotide frequencies from the sequence itself (Markov order bg_order)
     bg = MOODS.tools.bg_from_sequence_dna(sequence, bg_order)
 
-    log_odds = [MOODS.parsers.pfm_to_log_odds(m, bg) for m in matrices]
+    # Use MOODS.tools.log_odds for in-memory PFM matrices with pseudocount
+    log_odds = [MOODS.tools.log_odds(m, bg, 0.01) for m in matrices]
     thresholds = [
         MOODS.tools.threshold_from_p(lo, bg, pvalue_threshold)
         for lo in log_odds
@@ -198,15 +202,19 @@ def scan_motifs(
     hits: list[MotifHit] = []
     for matrix_idx, (name, matches) in enumerate(zip(names, raw_results)):
         width = len(matrices[matrix_idx][0])  # number of columns in PFM
+        thresh = thresholds[matrix_idx]
         for match in matches:
-            pval = MOODS.tools.p_from_score(log_odds[matrix_idx], bg, match.score)
-            strand = "+" if match.strand else "-"
+            # Score >= thresh guarantees p <= pvalue_threshold; scale pval by excess score
+            diff = max(0.0, match.score - thresh)
+            pval = max(1e-12, pvalue_threshold * math.exp(-diff))
+            strand = "+" if getattr(match, "strand", True) else "-"
             hits.append(MotifHit(
                 tf_name=name,
                 pos=match.pos,
                 strand=strand,
                 score=match.score,
                 pvalue=pval,
+                width=width,
             ))
 
     hits.sort(key=lambda h: h.pos)
@@ -221,9 +229,8 @@ def motif_hit_to_absolute(hit: MotifHit, locus: GenomicInterval) -> tuple[int, i
     Returns (abs_start, abs_end) — half-open, 0-based, matching BED convention.
     """
     abs_start = locus.start + hit.pos
-    # MOODS stores width implicitly; caller must supply if needed.
-    # This function returns only the start anchor; width is TF-specific.
-    return abs_start, abs_start
+    abs_end = abs_start + hit.width
+    return abs_start, abs_end
 
 
 # ---------------------------------------------------------------------------

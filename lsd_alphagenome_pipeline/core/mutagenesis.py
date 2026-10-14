@@ -169,7 +169,7 @@ class MutagenesisEngine:
     # ------------------------------------------------------------------
 
     def _spacer_shuffling(self, wt_cre: WildTypeCRE) -> Iterator[VariantRecord]:
-        """
+        r"""
         Vary the length of inter-motif spacer intervals.
 
         Algorithm:
@@ -201,19 +201,19 @@ class MutagenesisEngine:
         deltas = list(range(-max_delta, max_delta + 1))
         deltas.remove(0)  # delta=0 is the WT, not a mutant
 
+        seen: set[tuple[int, str]] = set()
         for spacer_start, spacer_end in spacers:
             spacer_len = spacer_end - spacer_start
             if spacer_len == 0:
                 continue
             for delta in deltas:
-                # Approximate length change by substituting bases in the spacer:
-                # positive delta → convert spacer bases toward high-GC (spacer expands)
-                # negative delta → convert spacer bases toward low-GC (spacer contracts)
-                # This is a conservative SNV-based approximation for AlphaGenome.
                 target_base = "G" if delta > 0 else "A"
                 centre = spacer_start + spacer_len // 2
                 offset = centre + delta  # shift centre by delta
                 offset = max(spacer_start, min(spacer_end - 1, offset))
+                if (offset, target_base) in seen:
+                    continue
+                seen.add((offset, target_base))
                 ref_base = seq[offset]
                 if ref_base == target_base or ref_base not in _BASES:
                     continue
@@ -238,17 +238,12 @@ class MutagenesisEngine:
     ) -> frozenset[int]:
         """
         Return set of CRE offsets covered by any TFBS motif hit.
-
-        MOODS does not store motif width in MotifHit directly, so we use
-        MOTIF_WIDTH_FALLBACK (10 bp) as a conservative protection zone.
-        Callers with access to per-TF widths should override this via the
-        config; for saturation mutagenesis the exact boundary matters less
-        because all locked positions are simply skipped.
+        Uses hit.width (falling back to MOTIF_WIDTH_FALLBACK if unset).
         """
         locked: set[int] = set()
         for hit in hits:
-            # Protection zone: [hit.pos, hit.pos + MOTIF_WIDTH_FALLBACK)
-            for i in range(hit.pos, min(hit.pos + MOTIF_WIDTH_FALLBACK, seq_len)):
+            w = getattr(hit, "width", MOTIF_WIDTH_FALLBACK)
+            for i in range(max(0, hit.pos), min(hit.pos + w, seq_len)):
                 locked.add(i)
         return frozenset(locked)
 
@@ -258,16 +253,31 @@ class MutagenesisEngine:
         seq_len: int,
     ) -> list[tuple[int, int]]:
         """
-        Return list of (spacer_start, spacer_end) intervals between sorted hits.
-
-        The first spacer starts after the end of hit[0],
-        the last spacer ends at the start of hit[-1].
-        Uses MOTIF_WIDTH_FALLBACK for hit end position.
+        Return list of (spacer_start, spacer_end) intervals between non-overlapping sorted hits.
+        Merges overlapping motif spans first.
         """
+        if not hits:
+            return []
+        spans: list[tuple[int, int]] = []
+        for h in sorted(hits, key=lambda x: x.pos):
+            w = getattr(h, "width", MOTIF_WIDTH_FALLBACK)
+            start = max(0, h.pos)
+            end = min(h.pos + w, seq_len)
+            if start >= end:
+                continue
+            if not spans:
+                spans.append((start, end))
+            else:
+                prev_start, prev_end = spans[-1]
+                if start <= prev_end:
+                    spans[-1] = (prev_start, max(prev_end, end))
+                else:
+                    spans.append((start, end))
+
         spacers: list[tuple[int, int]] = []
-        for i in range(len(hits) - 1):
-            spacer_start = hits[i].pos + MOTIF_WIDTH_FALLBACK
-            spacer_end = hits[i + 1].pos
+        for i in range(len(spans) - 1):
+            spacer_start = spans[i][1]
+            spacer_end = spans[i + 1][0]
             if spacer_end > spacer_start:
                 spacers.append((spacer_start, spacer_end))
         return spacers

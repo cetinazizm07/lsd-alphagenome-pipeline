@@ -65,6 +65,24 @@ class Pipeline:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         self._ckpt_dir.mkdir(exist_ok=True)
 
+        # Checkpoint invalidation if configuration changed
+        manifest_path = self._ckpt_dir / "manifest.json"
+        current_fp = self.config.fingerprint()
+        if manifest_path.exists():
+            try:
+                saved_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if saved_manifest.get("fingerprint") != current_fp:
+                    log.warning(
+                        "Configuration changed since last run; invalidating previous checkpoints."
+                    )
+                    for ckpt_file in self._ckpt_dir.glob("*.json"):
+                        ckpt_file.unlink()
+            except Exception as exc:
+                log.warning("Failed to parse manifest (%s); clearing checkpoints.", exc)
+                for ckpt_file in self._ckpt_dir.glob("*.json"):
+                    ckpt_file.unlink()
+        manifest_path.write_text(json.dumps({"fingerprint": current_fp}, indent=2), encoding="utf-8")
+
         # Persist config for reproducibility — written before any computation
         config_path = self.config.output_dir / "run_config.yaml"
         self.config.to_yaml(config_path)
@@ -202,6 +220,7 @@ class Pipeline:
                     "strand": h.strand,
                     "score": h.score,
                     "pvalue": h.pvalue,
+                    "width": getattr(h, "width", 10),
                 }
                 for h in wt.motif_hits
             ],
@@ -215,7 +234,14 @@ class Pipeline:
         iv = data["interval"]
         interval = GenomicInterval(iv["chrom"], iv["start"], iv["end"], iv.get("name", ""), iv.get("strand", "."))
         hits = [
-            MotifHit(h["tf_name"], h["pos"], h["strand"], h["score"], h["pvalue"])
+            MotifHit(
+                h["tf_name"],
+                h["pos"],
+                h["strand"],
+                h["score"],
+                h["pvalue"],
+                h.get("width", 10),
+            )
             for h in data.get("motif_hits", [])
         ]
         # LocusRecord not stored in checkpoint (not needed for downstream steps)
